@@ -108,7 +108,12 @@ class TicketProcessor:
                 "review_notes": final_state.get("review_notes"),
             }
 
-            self.ticket_repo.mark_completed(ticket_id, result, ticket.version)
+            # Reload ticket to get current version (heartbeats increment it)
+            current_ticket = self.ticket_repo.get_by_id(ticket_id)
+            if current_ticket is None:
+                raise TicketNotFoundError(f"Ticket {ticket_id} disappeared")
+
+            self.ticket_repo.mark_completed(ticket_id, result, current_ticket.version)
             self.event_repo.log_status_change(
                 ticket_id, TicketStatus.PROCESSING, TicketStatus.COMPLETED
             )
@@ -130,8 +135,11 @@ class TicketProcessor:
 
             # Check if max retries reached
             if attempt >= settings.max_retries:
+                # Reload for current version
+                current_ticket = self.ticket_repo.get_by_id(ticket_id)
+                version = current_ticket.version if current_ticket else 1
                 self.ticket_repo.mark_failed_permanent(
-                    ticket_id, str(e), ticket.version
+                    ticket_id, str(e), version
                 )
                 self.event_repo.log_status_change(
                     ticket_id, TicketStatus.PROCESSING, TicketStatus.FAILED_PERMANENT
