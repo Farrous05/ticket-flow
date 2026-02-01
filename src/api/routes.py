@@ -11,6 +11,7 @@ from src.api.models import (
     TicketResponse,
 )
 from src.common.logging import get_logger
+from src.common.metrics import TICKETS_CREATED
 from src.common.queue import QueueConnection, QueuePublisher
 from src.db.client import get_supabase_client
 from src.db.models import EventType, TicketCreate, TicketEventCreate, TicketStatus
@@ -78,6 +79,9 @@ def create_ticket(request: CreateTicketRequest) -> CreateTicketResponse:
 
     # Publish to queue
     publisher.publish(ticket_id)
+
+    # Record metric
+    TICKETS_CREATED.labels(status="created").inc()
 
     logger.info("ticket_created", ticket_id=str(ticket_id))
 

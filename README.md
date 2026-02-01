@@ -123,6 +123,7 @@ python -m src.worker.main
 | GET | `/tickets/{id}` | Get ticket status and result |
 | GET | `/tickets/{id}/events` | Get processing events |
 | GET | `/health` | Health check |
+| GET | `/metrics` | Prometheus metrics |
 
 ### Create Ticket
 
@@ -205,11 +206,35 @@ docker-compose up --build
 docker-compose up --scale worker=3
 ```
 
+## Workflow Visualization
+
+Generate a visual diagram of the LangGraph workflow:
+
+```bash
+python -m src.workflow.visualize workflow_graph.png
+```
+
+This outputs:
+- ASCII diagram to console
+- Mermaid diagram syntax
+- PNG image (if graphviz installed)
+
 ## Monitoring
 
 - **Metrics**: Prometheus metrics available at `/metrics`
 - **Logs**: Structured JSON logs to stdout
 - **Events**: Query `/tickets/{id}/events` for processing trail
+- **Tracing**: X-Request-ID header propagated through all components
+
+### Available Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `tickets_created_total` | Counter | Total tickets created |
+| `tickets_processed_total` | Counter | Total tickets processed by status |
+| `http_request_duration_seconds` | Histogram | API request latency |
+| `workflow_step_duration_seconds` | Histogram | Per-step workflow timing |
+| `ticket_processing_duration_seconds` | Histogram | Total processing time |
 
 ## Failure Handling
 
