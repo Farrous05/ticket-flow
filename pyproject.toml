@@ -19,10 +19,12 @@ dependencies = [
     "httpx>=0.26.0",
     "tenacity>=8.2.0",
     "grandalf>=0.8",
-    "pygraphviz>=1.11; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]
+viz = [
+    "pygraphviz>=1.11; sys_platform != 'win32'",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.23.0",

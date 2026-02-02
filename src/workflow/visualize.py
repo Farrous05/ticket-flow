@@ -8,28 +8,34 @@ Usage:
 import sys
 from pathlib import Path
 
-from src.workflow.graph import create_workflow
+from src.workflow.graph import get_compiled_workflow
 
 
 def generate_mermaid() -> str:
     """Generate Mermaid diagram syntax for the workflow."""
-    workflow = create_workflow()
-    graph = workflow.get_graph()
-    return graph.draw_mermaid()
+    compiled = get_compiled_workflow()
+    return compiled.get_graph().draw_mermaid()
 
 
 def generate_png(output_path: str = "workflow_graph.png") -> str:
     """
     Generate PNG image of the workflow graph.
 
+    Requires pygraphviz for PNG generation. Install with:
+        pip install "ticket-flow[viz]"
+
+    Also requires graphviz system library:
+        brew install graphviz  # macOS
+        apt-get install graphviz graphviz-dev  # Ubuntu/Debian
+
     Args:
         output_path: Path to save the PNG file
 
     Returns:
-        Path to the generated PNG file
+        Path to the generated PNG file (or .mmd fallback)
     """
-    workflow = create_workflow()
-    graph = workflow.get_graph()
+    compiled = get_compiled_workflow()
+    graph = compiled.get_graph()
 
     # Try different methods to generate PNG
     try:
@@ -45,15 +51,18 @@ def generate_png(output_path: str = "workflow_graph.png") -> str:
         png_data = graph.draw_png()
         Path(output_path).write_bytes(png_data)
         return output_path
-    except Exception:
-        pass
+    except ImportError:
+        print("pygraphviz not installed. Install with: pip install 'ticket-flow[viz]'")
+        print("Also install graphviz: brew install graphviz (macOS) or apt-get install graphviz graphviz-dev")
+    except Exception as e:
+        print(f"PNG generation error: {e}")
 
     # Method 3: Fallback to Mermaid text file
     mermaid_path = output_path.replace(".png", ".mmd")
     mermaid_content = graph.draw_mermaid()
     Path(mermaid_path).write_text(mermaid_content)
-    print(f"PNG generation failed. Mermaid diagram saved to: {mermaid_path}")
-    print("You can render it at: https://mermaid.live")
+    print(f"Mermaid diagram saved to: {mermaid_path}")
+    print("Render it at: https://mermaid.live")
     return mermaid_path
 
 
