@@ -7,6 +7,10 @@ from supabase import Client
 from src.common.logging import get_logger
 from src.db.client import get_supabase_client
 from src.db.models import (
+    ApprovalDecision,
+    ApprovalRequest,
+    ApprovalRequestCreate,
+    ApprovalStatus,
     EventType,
     Ticket,
     TicketCreate,
@@ -138,6 +142,15 @@ class TicketRepository:
         )
         return self.update(ticket_id, update, expected_version=expected_version)
 
+    def mark_awaiting_approval(
+        self, ticket_id: UUID, result: dict[str, Any], expected_version: int
+    ) -> Ticket:
+        update = TicketUpdate(
+            status=TicketStatus.AWAITING_APPROVAL,
+            result=result,
+        )
+        return self.update(ticket_id, update, expected_version=expected_version)
+
     def mark_failed_permanent(
         self, ticket_id: UUID, error: str, expected_version: int
     ) -> Ticket:
@@ -263,3 +276,74 @@ class WorkflowCheckpointRepository:
         self.client.table("workflow_checkpoints").delete().eq(
             "ticket_id", str(ticket_id)
         ).execute()
+
+
+class ApprovalRepository:
+    def __init__(self, client: Client | None = None):
+        self.client = client or get_supabase_client()
+
+    def create(self, approval: ApprovalRequestCreate) -> ApprovalRequest:
+        data = {
+            "ticket_id": str(approval.ticket_id),
+            "action_type": approval.action_type,
+            "action_params": approval.action_params,
+            "status": ApprovalStatus.PENDING.value,
+        }
+        result = self.client.table("approval_requests").insert(data).execute()
+        return ApprovalRequest(**result.data[0])
+
+    def get_by_id(self, approval_id: UUID) -> ApprovalRequest | None:
+        result = (
+            self.client.table("approval_requests")
+            .select("*")
+            .eq("id", str(approval_id))
+            .execute()
+        )
+        if not result.data:
+            return None
+        return ApprovalRequest(**result.data[0])
+
+    def get_by_ticket_id(self, ticket_id: UUID) -> list[ApprovalRequest]:
+        result = (
+            self.client.table("approval_requests")
+            .select("*")
+            .eq("ticket_id", str(ticket_id))
+            .order("requested_at", desc=True)
+            .execute()
+        )
+        return [ApprovalRequest(**row) for row in result.data]
+
+    def get_pending(self) -> list[ApprovalRequest]:
+        result = (
+            self.client.table("approval_requests")
+            .select("*")
+            .eq("status", ApprovalStatus.PENDING.value)
+            .order("requested_at", desc=False)
+            .execute()
+        )
+        return [ApprovalRequest(**row) for row in result.data]
+
+    def decide(
+        self, approval_id: UUID, decision: ApprovalDecision
+    ) -> ApprovalRequest | None:
+        now = datetime.now(timezone.utc)
+        status = ApprovalStatus.APPROVED if decision.approved else ApprovalStatus.REJECTED
+
+        data = {
+            "status": status.value,
+            "decided_at": now.isoformat(),
+            "decided_by": decision.decided_by,
+            "decision_reason": decision.reason,
+        }
+
+        result = (
+            self.client.table("approval_requests")
+            .update(data)
+            .eq("id", str(approval_id))
+            .eq("status", ApprovalStatus.PENDING.value)  # Only update if still pending
+            .execute()
+        )
+
+        if not result.data:
+            return None
+        return ApprovalRequest(**result.data[0])

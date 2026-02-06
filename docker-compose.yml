@@ -40,8 +40,18 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - WORKER_ID=worker-1
       - LOG_LEVEL=INFO
+      - USE_AGENT_WORKFLOW=true
     depends_on:
       rabbitmq:
         condition: service_healthy
     deploy:
       replicas: 1
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - api

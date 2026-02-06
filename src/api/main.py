@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from src.api.email_routes import router as email_router
 from src.api.routes import router
 from src.common.logging import get_logger, setup_logging
 from src.common.metrics import REQUEST_DURATION
@@ -65,6 +66,7 @@ async def metrics():
 
 
 app.include_router(router)
+app.include_router(email_router)
 
 
 @app.exception_handler(Exception)

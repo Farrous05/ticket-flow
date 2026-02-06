@@ -4,16 +4,21 @@ from uuid import UUID
 
 from src.common.config import get_settings
 from src.common.logging import get_logger
-from src.db.models import EventType, TicketEventCreate, TicketStatus, TicketUpdate
+from src.db.models import (
+    ApprovalRequestCreate,
+    EventType,
+    TicketEventCreate,
+    TicketStatus,
+    TicketUpdate,
+)
 from src.db.repositories import (
+    ApprovalRepository,
     OptimisticLockError,
     TicketEventRepository,
     TicketNotFoundError,
     TicketRepository,
     WorkflowCheckpointRepository,
 )
-from src.workflow.graph import get_compiled_workflow
-from src.workflow.state import WorkflowState
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -24,8 +29,21 @@ class TicketProcessor:
         self.ticket_repo = TicketRepository()
         self.event_repo = TicketEventRepository()
         self.checkpoint_repo = WorkflowCheckpointRepository()
-        self.workflow = get_compiled_workflow()
+        self.approval_repo = ApprovalRepository()
         self.worker_id = settings.worker_id
+        self.use_agent = settings.use_agent_workflow
+
+        # Initialize the appropriate workflow
+        if self.use_agent:
+            from src.workflow.agent import get_compiled_agent
+
+            self.workflow = get_compiled_agent()
+            logger.info("processor_initialized", mode="agent")
+        else:
+            from src.workflow.graph import get_compiled_workflow
+
+            self.workflow = get_compiled_workflow()
+            logger.info("processor_initialized", mode="legacy")
 
     def process(self, ticket_id: UUID, attempt: int) -> bool:
         """
@@ -42,8 +60,12 @@ class TicketProcessor:
             logger.error("ticket_not_found", ticket_id=str(ticket_id))
             return True  # Ack message, data inconsistency
 
-        # Check if already processed (idempotency)
-        if ticket.status in [TicketStatus.COMPLETED, TicketStatus.FAILED_PERMANENT]:
+        # Check if already processed or awaiting approval (idempotency)
+        if ticket.status in [
+            TicketStatus.COMPLETED,
+            TicketStatus.FAILED_PERMANENT,
+            TicketStatus.AWAITING_APPROVAL,
+        ]:
             logger.info(
                 "ticket_already_processed",
                 ticket_id=str(ticket_id),
@@ -89,30 +111,50 @@ class TicketProcessor:
             )
             initial_state = checkpoint.state
         else:
-            initial_state = {
-                "ticket_id": str(ticket_id),
-                "customer_id": ticket.customer_id,
-                "subject": ticket.subject,
-                "body": ticket.body,
-            }
+            initial_state = self._create_initial_state(ticket)
 
         # Execute workflow
         try:
             final_state = self._execute_workflow(ticket_id, initial_state)
 
-            # Mark completed
-            result = {
-                "classification": final_state.get("classification"),
-                "entities": final_state.get("entities"),
-                "final_response": final_state.get("final_response"),
-                "review_notes": final_state.get("review_notes"),
-            }
+            # Extract result based on workflow type
+            result = self._extract_result(final_state)
 
             # Reload ticket to get current version (heartbeats increment it)
             current_ticket = self.ticket_repo.get_by_id(ticket_id)
             if current_ticket is None:
                 raise TicketNotFoundError(f"Ticket {ticket_id} disappeared")
 
+            # Check if workflow is waiting for approval
+            pending_approval = result.get("pending_approval")
+            if pending_approval:
+                # Create approval request
+                approval_request = ApprovalRequestCreate(
+                    ticket_id=ticket_id,
+                    action_type=pending_approval.get("tool", "unknown"),
+                    action_params=pending_approval.get("args", {}),
+                )
+                approval = self.approval_repo.create(approval_request)
+                logger.info(
+                    "approval_requested",
+                    ticket_id=str(ticket_id),
+                    approval_id=str(approval.id),
+                    action_type=approval.action_type,
+                )
+
+                # Mark ticket as awaiting approval
+                self.ticket_repo.mark_awaiting_approval(
+                    ticket_id, result, current_ticket.version
+                )
+                self.event_repo.log_status_change(
+                    ticket_id, TicketStatus.PROCESSING, TicketStatus.AWAITING_APPROVAL
+                )
+
+                # Keep checkpoint for resuming after approval
+                logger.info("ticket_awaiting_approval", ticket_id=str(ticket_id))
+                return True
+
+            # Normal completion
             self.ticket_repo.mark_completed(ticket_id, result, current_ticket.version)
             self.event_repo.log_status_change(
                 ticket_id, TicketStatus.PROCESSING, TicketStatus.COMPLETED
@@ -138,9 +180,7 @@ class TicketProcessor:
                 # Reload for current version
                 current_ticket = self.ticket_repo.get_by_id(ticket_id)
                 version = current_ticket.version if current_ticket else 1
-                self.ticket_repo.mark_failed_permanent(
-                    ticket_id, str(e), version
-                )
+                self.ticket_repo.mark_failed_permanent(ticket_id, str(e), version)
                 self.event_repo.log_status_change(
                     ticket_id, TicketStatus.PROCESSING, TicketStatus.FAILED_PERMANENT
                 )
@@ -151,6 +191,64 @@ class TicketProcessor:
             self.ticket_repo.increment_attempt(ticket_id)
             self.event_repo.log_retry(ticket_id, attempt, str(e))
             return False
+
+    def _create_initial_state(self, ticket) -> dict[str, Any]:
+        """Create initial state based on workflow type."""
+        if self.use_agent:
+            # Agent workflow needs messages
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            from src.workflow.agent import SYSTEM_PROMPT
+
+            ticket_message = f"""## Support Ticket
+
+**Ticket ID:** {ticket.id}
+**Customer ID:** {ticket.customer_id}
+**Subject:** {ticket.subject}
+
+**Message:**
+{ticket.body}
+
+Please analyze this ticket and help resolve the customer's issue."""
+
+            return {
+                "ticket_id": str(ticket.id),
+                "customer_id": ticket.customer_id,
+                "subject": ticket.subject,
+                "body": ticket.body,
+                "messages": [
+                    SystemMessage(content=SYSTEM_PROMPT),
+                    HumanMessage(content=ticket_message),
+                ],
+                "final_response": None,
+                "actions_taken": [],
+                "pending_approval": None,
+                "should_end": False,
+            }
+        else:
+            # Legacy workflow
+            return {
+                "ticket_id": str(ticket.id),
+                "customer_id": ticket.customer_id,
+                "subject": ticket.subject,
+                "body": ticket.body,
+            }
+
+    def _extract_result(self, final_state: dict[str, Any]) -> dict[str, Any]:
+        """Extract result based on workflow type."""
+        if self.use_agent:
+            return {
+                "final_response": final_state.get("final_response"),
+                "actions_taken": final_state.get("actions_taken", []),
+                "pending_approval": final_state.get("pending_approval"),
+            }
+        else:
+            return {
+                "classification": final_state.get("classification"),
+                "entities": final_state.get("entities"),
+                "final_response": final_state.get("final_response"),
+                "review_notes": final_state.get("review_notes"),
+            }
 
     def _execute_workflow(
         self, ticket_id: UUID, initial_state: dict[str, Any]
@@ -164,14 +262,28 @@ class TicketProcessor:
             # event is a dict with node name as key
             for node_name, node_output in event.items():
                 if isinstance(node_output, dict):
-                    final_state = {**final_state, **node_output}
+                    # Merge state carefully for agent workflow
+                    if self.use_agent and "messages" in node_output:
+                        # Messages need special handling - they accumulate
+                        current_messages = final_state.get("messages", [])
+                        new_messages = node_output.get("messages", [])
+                        final_state = {
+                            **final_state,
+                            **node_output,
+                            "messages": current_messages + list(new_messages),
+                        }
+                    else:
+                        final_state = {**final_state, **node_output}
 
-                    # Save checkpoint
+                    # Save checkpoint (serialize messages for agent)
+                    checkpoint_state = self._serialize_state_for_checkpoint(final_state)
+
                     from src.db.models import WorkflowCheckpointUpsert
+
                     self.checkpoint_repo.upsert(
                         WorkflowCheckpointUpsert(
                             ticket_id=ticket_id,
-                            state=final_state,
+                            state=checkpoint_state,
                             current_step=node_output.get("current_step", node_name),
                         )
                     )
@@ -187,3 +299,24 @@ class TicketProcessor:
                     self.ticket_repo.update_heartbeat(ticket_id, self.worker_id)
 
         return final_state
+
+    def _serialize_state_for_checkpoint(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Serialize state for JSON storage in checkpoint."""
+        serialized = {}
+
+        for key, value in state.items():
+            if key == "messages":
+                # Serialize messages to dicts
+                serialized[key] = [
+                    {
+                        "type": type(msg).__name__,
+                        "content": msg.content,
+                        "additional_kwargs": getattr(msg, "additional_kwargs", {}),
+                    }
+                    for msg in value
+                    if hasattr(msg, "content")
+                ]
+            else:
+                serialized[key] = value
+
+        return serialized

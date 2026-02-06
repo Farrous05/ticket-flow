@@ -34,6 +34,27 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 2
 
+    # Agent settings
+    use_agent_workflow: bool = True  # Set to False to use legacy fixed pipeline
+
+    # Email settings
+    email_provider: str = "mock"  # "sendgrid", "mailgun", or "mock"
+    email_from_address: str = "support@example.com"
+    email_from_name: str = "Support Team"
+    email_domain: str = "example.com"
+
+    # SendGrid
+    sendgrid_api_key: str | None = None
+
+    # Mailgun
+    mailgun_api_key: str | None = None
+    mailgun_domain: str | None = None
+    mailgun_webhook_key: str | None = None
+
+    # GitHub Integration (for bug reports)
+    github_token: str | None = None
+    github_repo: str | None = None  # Format: "owner/repo"
+
 
 @lru_cache
 def get_settings() -> Settings:

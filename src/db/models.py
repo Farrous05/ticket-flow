@@ -9,8 +9,15 @@ from pydantic import BaseModel, Field
 class TicketStatus(str, Enum):
     PENDING = "pending"
     PROCESSING = "processing"
+    AWAITING_APPROVAL = "awaiting_approval"
     COMPLETED = "completed"
     FAILED_PERMANENT = "failed_permanent"
+
+
+class ApprovalStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
 
 
 class Ticket(BaseModel):
@@ -81,3 +88,27 @@ class WorkflowCheckpointUpsert(BaseModel):
     ticket_id: UUID
     state: dict[str, Any]
     current_step: str
+
+
+class ApprovalRequest(BaseModel):
+    id: UUID
+    ticket_id: UUID
+    action_type: str
+    action_params: dict[str, Any]
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    requested_at: datetime
+    decided_at: datetime | None = None
+    decided_by: str | None = None
+    decision_reason: str | None = None
+
+
+class ApprovalRequestCreate(BaseModel):
+    ticket_id: UUID
+    action_type: str
+    action_params: dict[str, Any]
+
+
+class ApprovalDecision(BaseModel):
+    approved: bool
+    decided_by: str
+    reason: str | None = None
